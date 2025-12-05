@@ -616,8 +616,10 @@ except ImportError:
     sys.exit(1)
 
 
+import os
+
 # --- Configuration ---
-ACCESS_TOKEN = 'eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI3NkFGMzUiLCJqdGkiOiI2OTMyNTI3MmY0YmViNzIzYjIzNGI1ZDEiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc2NDkwNTU4NiwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzY0OTcyMDAwfQ.J9rmWq2YRbh7RQFxLsMwaRWCE5vVyGcsY-uk8adQheU'
+ACCESS_TOKEN = os.environ.get('UPSTOX_ACCESS_TOKEN', 'YOUR_DEFAULT_TOKEN')
 INSTRUMENTS_FILE_PATH = 'nse.json.gz'
 # Use "full" mode to receive L5 Order Book data necessary for OBI Strategy
 SUBSCRIPTION_MODE = "full"

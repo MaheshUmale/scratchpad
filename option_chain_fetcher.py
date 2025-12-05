@@ -88,15 +88,15 @@ def calculate_oi_metrics(df, prev_df):
     df['pe_oi_change'] = merged_df['pe_open_interest'] - merged_df['pe_open_interest_prev']
 
     # Identify Buildups and Unwinding
-    df['ce_long_buildup'] = (df['ce_oi_change'] > 0) & (df['ce_ltp'].diff() > 0)
-    df['ce_short_buildup'] = (df['ce_oi_change'] > 0) & (df['ce_ltp'].diff() < 0)
-    df['ce_long_unwinding'] = (df['ce_oi_change'] < 0) & (df['ce_ltp'].diff() < 0)
-    df['ce_short_covering'] = (df['ce_oi_change'] < 0) & (df['ce_ltp'].diff() > 0)
+    df['ce_long_buildup'] = (df['ce_oi_change'] > 0) & (merged_df['ce_ltp'] > merged_df['ce_ltp_prev'])
+    df['ce_short_buildup'] = (df['ce_oi_change'] > 0) & (merged_df['ce_ltp'] < merged_df['ce_ltp_prev'])
+    df['ce_long_unwinding'] = (df['ce_oi_change'] < 0) & (merged_df['ce_ltp'] < merged_df['ce_ltp_prev'])
+    df['ce_short_covering'] = (df['ce_oi_change'] < 0) & (merged_df['ce_ltp'] > merged_df['ce_ltp_prev'])
 
-    df['pe_long_buildup'] = (df['pe_oi_change'] > 0) & (df['pe_ltp'].diff() > 0)
-    df['pe_short_buildup'] = (df['pe_oi_change'] > 0) & (df['pe_ltp'].diff() < 0)
-    df['pe_long_unwinding'] = (df['pe_oi_change'] < 0) & (df['pe_ltp'].diff() < 0)
-    df['pe_short_covering'] = (df['pe_oi_change'] < 0) & (df['pe_ltp'].diff() > 0)
+    df['pe_long_buildup'] = (df['pe_oi_change'] > 0) & (merged_df['pe_ltp'] > merged_df['pe_ltp_prev'])
+    df['pe_short_buildup'] = (df['pe_oi_change'] > 0) & (merged_df['pe_ltp'] < merged_df['pe_ltp_prev'])
+    df['pe_long_unwinding'] = (df['pe_oi_change'] < 0) & (merged_df['pe_ltp'] < merged_df['pe_ltp_prev'])
+    df['pe_short_covering'] = (df['pe_oi_change'] < 0) & (merged_df['pe_ltp'] > merged_df['pe_ltp_prev'])
 
     return df
 

@@ -14,16 +14,12 @@ from collections import defaultdict
 import time
 
 from datetime import datetime , timedelta
-# IMPORT THE PLOT GENERATION UTILITY
-try:
-    from ORDER_FLOW_PLOT_VISUALIZER import generate_plot_json, connect_db
-except ImportError:
-    print("FATAL ERROR: trade_visualizer.py not found. Please ensure it is in the same directory.")
-    sys.exit(1)
+
+import os
 
 # --- Configuration ---
 
-ACCESS_TOKEN = 'eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI3NkFGMzUiLCJqdGkiOiI2OTMyNTI3MmY0YmViNzIzYjIzNGI1ZDEiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc2NDkwNTU4NiwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzY0OTcyMDAwfQ.J9rmWq2YRbh7RQFxLsMwaRWCE5vVyGcsY-uk8adQheU'
+ACCESS_TOKEN = os.environ.get('UPSTOX_ACCESS_TOKEN', 'YOUR_DEFAULT_TOKEN')
 # ACCESS_TOKEN = 'eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI3NkFGMzUiLCJqdGkiOiI2OTMxMDQyODc0NTMwYTc3OGEwNTg1OGMiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc2NDgyMDAwOCwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzY0ODg1NjAwfQ.VaK5XMfbXo7_EJofSuFcJjxqykx4zXQTOULT_z7hqr8'
 INSTRUMENTS_FILE_PATH = 'nse.json.gz'
 # Use "full" mode to receive L5 Order Book data necessary for OBI Strategy
@@ -561,27 +557,6 @@ def option_chain_api(instrument_key):
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# --- ROUTE FOR PLOTLY CHART DATA ---
-@app.route('/api/plot/<instrument_key>')
-def plot_data_api(instrument_key):
-    """
-    API endpoint to generate and return the Plotly chart JSON for a specific instrument.
-
-    FIX: Ensure that successful plot generation returns the JSON directly without
-    a top-level 'status' field, as Plotly expects the figure structure at the root.
-    If there is an error from generate_plot_json, wrap it in a proper JSON error message.
-    """
-    plot_json = generate_plot_json(instrument_key)
-
-    # Check if the plot_json contains the error key (indicating failure)
-    # if "error" in plot_json:
-    #     # If it failed, return a structured error response with status 500
-    #     return jsonify({"status": "error", "message": plot_json["error"]}), 500
-
-    # If successful, plot_json is the Plotly figure object (data and layout).
-    # Return it directly. The original issue was likely caused by a previous
-    # implementation wrapping this successful data in an {"message": ..., "status": "error"} structure.
-    return jsonify(plot_json)
 
 
 
