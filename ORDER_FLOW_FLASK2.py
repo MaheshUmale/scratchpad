@@ -2,7 +2,7 @@ from flask import Flask, render_template_string, jsonify, request
 from pymongo import MongoClient
 from datetime import datetime
 import sys
-from collections import defaultdict 
+from collections import defaultdict
 import json
 from flask import Flask, render_template_string, jsonify, request
 from pymongo import MongoClient
@@ -10,25 +10,21 @@ from datetime import datetime
 import sys
 import json
 from urllib.parse import unquote # For decoding the instrument key
-from collections import defaultdict 
+from collections import defaultdict
 import time
 
 from datetime import datetime , timedelta
-# IMPORT THE PLOT GENERATION UTILITY
-try:
-    from ORDER_FLOW_PLOT_VISUALIZER import generate_plot_json, connect_db
-except ImportError:
-    print("FATAL ERROR: trade_visualizer.py not found. Please ensure it is in the same directory.")
-    sys.exit(1)
+
+import os
 
 # --- Configuration ---
 
-ACCESS_TOKEN = 'eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI3NkFGMzUiLCJqdGkiOiI2OTMyNTI3MmY0YmViNzIzYjIzNGI1ZDEiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc2NDkwNTU4NiwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzY0OTcyMDAwfQ.J9rmWq2YRbh7RQFxLsMwaRWCE5vVyGcsY-uk8adQheU'
+ACCESS_TOKEN = os.environ.get('UPSTOX_ACCESS_TOKEN', 'YOUR_DEFAULT_TOKEN')
 # ACCESS_TOKEN = 'eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI3NkFGMzUiLCJqdGkiOiI2OTMxMDQyODc0NTMwYTc3OGEwNTg1OGMiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc2NDgyMDAwOCwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzY0ODg1NjAwfQ.VaK5XMfbXo7_EJofSuFcJjxqykx4zXQTOULT_z7hqr8'
 INSTRUMENTS_FILE_PATH = 'nse.json.gz'
 # Use "full" mode to receive L5 Order Book data necessary for OBI Strategy
 # --- Configuration (MUST MATCH strategy script) ---\
-MONGO_URI = "mongodb://localhost:27017/" 
+MONGO_URI = "mongodb://localhost:27017/"
 MONGO_DB_NAME = "upstox_strategy_db"
 SIGNAL_COLLECTION = "trade_signals"
 # ---------------------------------------------------
@@ -58,20 +54,20 @@ history_api_instance = upstox_client.HistoryV3Api(api_client)
 def generate_ohlc_data_for_lightweight_charts(instrument_key):
     """
     STUB: Generates a sample OHLC data array for Lightweight Charts.
-    
+
     Lightweight Charts expects data in the format:
     [
         { time: 1642435200, open: 100, high: 105, low: 98, close: 103 },
         { time: 1642521600, open: 103, high: 106, low: 102, close: 104 },
         ...
     ]
-    
-    You MUST replace this with logic that fetches minute/5-minute/etc., 
+
+    You MUST replace this with logic that fetches minute/5-minute/etc.,
     OHLC bars calculated from your raw tick data in the TICK_COLLECTION.
     """
     # Define the chart parameters
     INTERVAL = "1" # 5-minute intervals
-    
+
     # The Upstox API expects the interval as 'minutes', 'hours', 'day', 'week', or 'month'
     # The v3 API uses enum values like MINUTE_5, DAY_1, etc.
     # However, the user's example used "minutes" and "5", which corresponds to the V2 documentation.
@@ -87,7 +83,7 @@ def generate_ohlc_data_for_lightweight_charts(instrument_key):
         interval=INTERVAL,
     )
     # history_api_instance.get_intra_day_candle_data("NSE_EQ|INE848E01016", "minutes", "1")
-  
+
 
     # Response structure:
     # response.data = [{candles: [ [time, open, high, low, close, volume], ... ]}]
@@ -98,11 +94,11 @@ def generate_ohlc_data_for_lightweight_charts(instrument_key):
     ohlc_data = []
     for candle in response.data.candles:
         # Candle array structure: [time, open, high, low, close, volume]
-        
+
         # The 'time' field is an ISO 8601 string (e.g., "2024-03-01T09:15:00+05:30")
         # 1. Parse the ISO 8601 string into a datetime object
         # 2. Convert to UTC Unix timestamp (seconds) for Lightweight Charts
-        
+
         try:
             # Lightweight Charts requires the time in UTC Epoch seconds.
             # Use standard parsing (assumes the time string is compatible)
@@ -116,7 +112,7 @@ def generate_ohlc_data_for_lightweight_charts(instrument_key):
                 unix_time_seconds = int(dt_obj.timestamp())
             except:
                     # Skip invalid candles
-                    continue 
+                    continue
         ist_offset_seconds = 18000 + 1800
         ohlc_data.append({
             "time": unix_time_seconds+ist_offset_seconds,
@@ -126,15 +122,15 @@ def generate_ohlc_data_for_lightweight_charts(instrument_key):
             "close": candle[4],
             # Volume is not strictly needed for Lightweight Charts OHLC
         })
-        
+
     # The data is usually returned in reverse chronological order (newest first)
     # We must reverse it to be chronological (oldest first) for Lightweight Charts
     ohlc_data.reverse()
 
     if not ohlc_data:
         print(f"No OHLC data returned from Upstox API for {instrument_key}.")
-        return json.dumps([]) 
-        
+        return json.dumps([])
+
     return json.dumps(ohlc_data)
 
 
@@ -148,7 +144,7 @@ def get_live_report_data():
         return {"error": "Database not connected."}, 500
 
     today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    
+
     # 1. Fetch all entry and exit logs since midnight
     signals = list(db[SIGNAL_COLLECTION].find({
         "timestamp": {"$gte": today.timestamp()}
@@ -160,7 +156,7 @@ def get_live_report_data():
     for signal in signals:
         trade_id = signal.get('trade_id')
         instrument = signal.get('instrumentKey')
-        
+
         if signal['type'] == 'ENTRY':
             trades[trade_id].update({
                 'status': 'OPEN',
@@ -170,7 +166,7 @@ def get_live_report_data():
                 'quantity': signal.get('quantity', 0),
                 'side': signal.get('signal', 'UNKNOWN'),
             })
-        
+
         elif signal['type'] == 'EXIT':
             pnl = signal.get('pnl', 0)
             trades[trade_id]['status'] = 'COMPLETED'
@@ -198,7 +194,7 @@ def get_live_report_data():
                 'reason': trade_data['reason'],
                 'pnl': trade_data['pnl'],
             })
-            
+
     # Calculate summary by instrument
     summary = defaultdict(lambda: {'trades': 0, 'pnl': 0})
     for trade in completed_trades:
@@ -224,7 +220,7 @@ def dashboard():
 
     total_trades = len(data['completed_trades'])
     total_open = len(data['open_positions'])
-    
+
     pnl_color_total = 'bg-green-100 text-green-800' if data['total_pnl'] > 0 else 'bg-red-100 text-red-800'
 
     html_template = f"""
@@ -247,7 +243,7 @@ def dashboard():
     <body class="p-8">
         <div class="max-w-7xl mx-auto">
             <h1 class="text-4xl font-bold text-gray-800 mb-6 border-b pb-2">Live Trading Dashboard</h1>
-            
+
             <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
                 <div class="card">
                     <p class="text-sm font-medium text-gray-500">Total P&L (Today)</p>
@@ -307,6 +303,19 @@ def dashboard():
                 </table>
             </div>
 
+            <!-- Option Chain -->
+            <div class="card mb-8">
+                <h2 class="text-2xl font-semibold text-gray-700 mb-4">Option Chain</h2>
+                <div class="flex items-center mb-4">
+                    <label for="instrument-select" class="mr-2">Select Instrument:</label>
+                    <select id="instrument-select" class="border rounded p-2">
+                        <option value="NSE_INDEX|Nifty 50">NIFTY</option>
+                        <option value="NSE_INDEX|Nifty Bank">BANKNIFTY</option>
+                    </select>
+                </div>
+                <div id="option-chain-container"></div>
+            </div>
+
             <!-- Summary -->
             <div class="card">
                 <h2 class="text-2xl font-semibold text-gray-700 mb-4">Summary by Instrument</h2>
@@ -357,11 +366,11 @@ def dashboard():
                 document.getElementById('open_count').textContent = trades.length;
                 document.getElementById('open_count_header').textContent = trades.length;
             }}
-            
+
             function renderCompletedTrades(trades) {{
                 const tbody = document.getElementById('completed_trades_body');
                 // Reverse trades to show newest at the top
-                const reversedTrades = [...trades].reverse(); 
+                const reversedTrades = [...trades].reverse();
                 let rows = '';
                 if (reversedTrades.length === 0) {{
                     rows = '<tr><td colspan="9" style="text-align: center;">No completed trades to display.</td></tr>';
@@ -417,7 +426,7 @@ def dashboard():
 
                 const statusElement = document.getElementById('pnl_status');
                 const pnlContainer = statusElement.parentElement.parentElement; // The card element
-                
+
                 // Update P&L color status and text
                 if (data.total_pnl >= 0) {{
                      statusElement.textContent = 'PROFIT';
@@ -438,12 +447,12 @@ def dashboard():
                             console.error('API Error:', data.message);
                             return;
                         }}
-                        
+
                         updateMetrics(data);
                         renderOpenTrades(data.open_positions);
                         renderCompletedTrades(data.completed_trades);
                         renderSummary(data.trade_summary);
-                        
+
                     }})
                     .catch(error => {{
                         console.error('Error fetching live P&L:', error);
@@ -451,11 +460,68 @@ def dashboard():
                     }});
             }}
 
+            function renderOptionChain(data) {{
+                const container = document.getElementById('option-chain-container');
+                let table = '<table class="w-full text-sm text-left text-gray-500">';
+                table += '<thead class="text-xs text-gray-700 uppercase bg-gray-50">';
+                table += '<tr>';
+                table += '<th scope="col" class="px-6 py-3">CE Buildup</th>';
+                table += '<th scope="col" class="px-6 py-3">CE OI Chg</th>';
+                table += '<th scope="col" class="px-6 py-3">CE OI</th>';
+                table += '<th scope="col" class="px-6 py-3">CE LTP</th>';
+                table += '<th scope="col" class="px-6 py-3">Strike</th>';
+                table += '<th scope="col" class="px-6 py-3">PE LTP</th>';
+                table += '<th scope="col" class="px-6 py-3">PE OI</th>';
+                table += '<th scope="col" class="px-6 py-3">PE OI Chg</th>';
+                table += '<th scope="col" class="px-6 py-3">PE Buildup</th>';
+                table += '</tr></thead><tbody>';
+
+                data.options_chain.forEach(option => {{
+                    table += '<tr class="bg-white border-b">';
+                    table += `<td class="px-6 py-4">${option.ce_long_buildup ? 'Long' : (option.ce_short_buildup ? 'Short' : (option.ce_long_unwinding ? 'Unwinding' : (option.ce_short_covering ? 'Covering' : '')))}</td>`;
+                    table += `<td class="px-6 py-4">${option.ce_oi_change}</td>`;
+                    table += `<td class="px-6 py-4">${{option.ce_open_interest}}</td>`;
+                    table += `<td class="px-6 py-4">${{option.ce_ltp}}</td>`;
+                    table += `<th scope="row" class="px-6 py-4 font-medium text-gray-900 whitespace-nowrap">${{option.strike_price}}</th>`;
+                    table += `<td class="px-6 py-4">${{option.pe_ltp}}</td>`;
+                    table += `<td class="px-6 py-4">${{option.pe_open_interest}}</td>`;
+                    table += `<td class="px-6 py-4">${option.pe_oi_change}</td>`;
+                    table += `<td class="px-6 py-4">${option.pe_long_buildup ? 'Long' : (option.pe_short_buildup ? 'Short' : (option.pe_long_unwinding ? 'Unwinding' : (option.pe_short_covering ? 'Covering' : '')))}</td>`;
+                    table += '</tr>';
+                }});
+
+                table += '</tbody></table>';
+                container.innerHTML = table;
+            }}
+
+            function fetchOptionChain(instrumentKey) {{
+                fetch(`/api/option_chain/${{instrumentKey}}`)
+                    .then(response => response.json())
+                    .then(data => {{
+                        if (data.status === 'error') {{
+                            console.error('API Error:', data.message);
+                            return;
+                        }}
+                        renderOptionChain(data);
+                    }})
+                    .catch(error => {{
+                        console.error('Error fetching option chain:', error);
+                    }});
+            }}
+
             // Initial load
             updateDashboard();
-            
+
             // Refresh every 30 seconds (30000 milliseconds)
-            setInterval(updateDashboard, REFRESH_INTERVAL_MS); 
+            setInterval(updateDashboard, REFRESH_INTERVAL_MS);
+
+            const instrumentSelect = document.getElementById('instrument-select');
+            instrumentSelect.addEventListener('change', (event) => {{
+                fetchOptionChain(event.target.value);
+            }});
+
+            // Initial load
+            fetchOptionChain(instrumentSelect.value);
         </script>
     </body>
     </html>
@@ -470,27 +536,27 @@ def live_pnl_api():
         return jsonify({"status": "error", "message": data[0].get("error")}), data[1]
     return jsonify(data)
 
-# --- ROUTE FOR PLOTLY CHART DATA ---
-@app.route('/api/plot/<instrument_key>')
-def plot_data_api(instrument_key):
-    """
-    API endpoint to generate and return the Plotly chart JSON for a specific instrument.
-    
-    FIX: Ensure that successful plot generation returns the JSON directly without 
-    a top-level 'status' field, as Plotly expects the figure structure at the root.
-    If there is an error from generate_plot_json, wrap it in a proper JSON error message.
-    """
-    plot_json = generate_plot_json(instrument_key)
-    
-    # Check if the plot_json contains the error key (indicating failure)
-    # if "error" in plot_json:
-    #     # If it failed, return a structured error response with status 500
-    #     return jsonify({"status": "error", "message": plot_json["error"]}), 500
+@app.route('/api/option_chain/<instrument_key>')
+def option_chain_api(instrument_key):
+    """API endpoint to return the latest option chain data as JSON."""
+    if db is None:
+        return jsonify({"status": "error", "message": "Database not connected."}), 500
 
-    # If successful, plot_json is the Plotly figure object (data and layout).
-    # Return it directly. The original issue was likely caused by a previous 
-    # implementation wrapping this successful data in an {"message": ..., "status": "error"} structure.
-    return jsonify(plot_json)
+    try:
+        clean_key = unquote(instrument_key)
+        latest_oc = db["option_chain"].find_one(
+            {"instrument_key": clean_key},
+            sort=[("timestamp", -1)]
+        )
+        if latest_oc:
+            # The _id field is not JSON serializable, so we remove it.
+            latest_oc.pop('_id', None)
+            return jsonify(latest_oc)
+        else:
+            return jsonify({"status": "error", "message": "No option chain data found for the instrument."}), 404
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
 
 
 
@@ -509,7 +575,7 @@ def get_trade_signals_for_chart(instrument_key  ):
     if db is None:
         # Return error as JSON string for safe handling in the API endpoint
         return json.dumps({"status": "error", "message": "Database not connected."})
-    
+
     print(" DB IS THERE ")
     print(instrument_key)
     # Query for all signals for the instrument for today
@@ -528,28 +594,28 @@ def get_trade_signals_for_chart(instrument_key  ):
     timestamp = int(prior_date.timestamp())
     query = {
         "instrumentKey": instrument_key,
-        "timestamp": {"$gte": timestamp} 
+        "timestamp": {"$gte": timestamp}
     }
-    
+
     print(query)
     signals_data = []
     try:
         # Sort by timestamp ascending to ensure correct chronological plotting
-        cursor = db[SIGNAL_COLLECTION].find(query).sort("timestamp", 1) 
-        
- 
+        cursor = db[SIGNAL_COLLECTION].find(query).sort("timestamp", 1)
+
+
         ist_offset_seconds = 18000 + 1800
         for doc in cursor:
             # print("got data 111")
             if 'timestamp' in doc and 'signal' in doc and 'ltp' in doc:
                 # Convert MongoDB datetime to UTC Unix timestamp (seconds)
                 unix_time_seconds = int(doc['timestamp'] ) +ist_offset_seconds
-                
+
                 signals_data.append({
                     "time": unix_time_seconds,
                     # order_type should be one of ENTRY_BUY, ENTRY_SELL, EXIT_BUY, EXIT_SELL
-                    "signal": doc['signal'], 
-                    "type": doc['type'], 
+                    "signal": doc['signal'],
+                    "type": doc['type'],
                     "price": float(doc['ltp']),
                    "sl_price" : float(doc['stop_loss_price']),
                     "tp_price" : float(doc['take_profit_price']),
@@ -559,12 +625,12 @@ def get_trade_signals_for_chart(instrument_key  ):
             if 'timestamp' in doc and 'signal' in doc and 'exit_price' in doc:
                 # Convert MongoDB datetime to UTC Unix timestamp (seconds)
                 unix_time_seconds = int(doc['timestamp'] )+ist_offset_seconds
-                
+
                 signals_data.append({
                     "time": unix_time_seconds,
                     # order_type should be one of ENTRY_BUY, ENTRY_SELL, EXIT_BUY, EXIT_SELL
-                    "signal": doc['signal'], 
-                    "type": doc['type'], 
+                    "signal": doc['signal'],
+                    "type": doc['type'],
                     "price": float(doc['exit_price']),
 
 
@@ -574,16 +640,16 @@ def get_trade_signals_for_chart(instrument_key  ):
                         # 305.85
                 })
 
-                
+
 
 
                 # print("got data ")
         return json.dumps(signals_data)
-        
+
     except Exception as e:
         error_msg = f"Error fetching trade signals from MongoDB for {instrument_key}: {e}"
         print(f"[ERROR] {error_msg}")
-        import traceback 
+        import traceback
         traceback.print_exc()
         return json.dumps({"status": "error", "message": error_msg})
 
@@ -595,9 +661,9 @@ def trade_signals_api(instrument_key):
     """
     # NOTE: This function needs to be registered with the Flask app instance
     # using @app.route('/api/trade_signals/<path:instrument_key>')
-    
+
     clean_key = unquote(instrument_key)
-    
+
     # 1. Generate signals data (JSON string)
     signals_data_json_str = get_trade_signals_for_chart(clean_key )
 
@@ -608,7 +674,7 @@ def trade_signals_api(instrument_key):
         # Check for JSON structure errors (e.g., {"status": "error", ...})
         if isinstance(signals_data, dict) and signals_data.get("status") == "error":
              return jsonify(signals_data), 500
-        
+
         return jsonify(signals_data)
 
     except Exception as e:
@@ -636,10 +702,10 @@ def plot_page(instrument_key):
 def chart_data_api(instrument_key):
     """API endpoint to return OHLC JSON for the given instrument."""
     clean_key = unquote(instrument_key)
-    
+
     # 1. Generate OHLC data (JSON string)
     chart_data_json_str = generate_ohlc_data_for_lightweight_charts(clean_key)
-    
+
     # # 2. Check for internal errors
     # if chart_data_json_str.startswith("Error:"):
     #     # Safely return the error message
@@ -649,20 +715,20 @@ def chart_data_api(instrument_key):
     try:
         # chart_data_json_str should be a valid JSON list of OHLC objects
         chart_data = json.loads(chart_data_json_str)
-        
+
         # The frontend expects a list of data points, not a wrapped JSON object.
         # We wrap it only if we need status, otherwise just return the data list.
-        return jsonify(chart_data) 
+        return jsonify(chart_data)
     except Exception as e:
         # This catches errors if the data generation stub returned something that isn't valid JSON
         return jsonify({"status": "error", "message": f"Failed to parse chart JSON on server: {e}"}), 500
 
- 
+
 # Template for the chart page (using Lightweight Charts)
 
 
 
-template =f""" 
+template =f"""
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -673,8 +739,8 @@ template =f"""
     <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
-        body {{ 
-            font-family: 'Inter', sans-serif; 
+        body {{
+            font-family: 'Inter', sans-serif;
             background-color: #1f2937; /* Dark background */
             color: #f3f4f6;
             margin: 0;
@@ -683,18 +749,18 @@ template =f"""
             flex-direction: column;
             align-items: center;
         }}
-        .container {{ 
-            width: 90%; 
-            max-width: 1400px; 
+        .container {{
+            width: 90%;
+            max-width: 1400px;
             margin-top: 20px;
-            padding: 20px; 
+            padding: 20px;
             background-color: #374151;
             border-radius: 8px;
             box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
         }}
-        #chart-container {{ 
-            height: 65vh; 
-            min-height: 400px; 
+        #chart-container {{
+            height: 65vh;
+            min-height: 400px;
             width: 100%;
         }}
         .loader {{
@@ -711,11 +777,11 @@ template =f"""
             100% {{ transform: rotate(360deg); }}
         }}
 
-        
+
         .chart-controls {{
             margin-top: 10px;
         }}
-        .chart-controls button {{ 
+        .chart-controls button {{
             padding: 8px 16px;
             margin: 2px;
             cursor: pointer;
@@ -734,17 +800,17 @@ template =f"""
 
     <div class="container">
         <h1 class="text-3xl font-bold mb-6 text-gray-100">Chart for: <span id="instrument-key-display">{{{{ instrument_key }}}}</span></h1>
-        
+
         <div id="loading-message" class="text-center p-8">
             <div class="loader"></div>
             <span class="text-lg text-blue-400">Loading chart data...</span>
         </div>
-        
+
         <div id="error-message" class="hidden bg-red-800 border border-red-500 text-red-200 px-4 py-3 rounded relative mb-4" role="alert">
             <strong class="font-bold">Error!</strong>
             <span class="block sm:inline" id="error-text"></span>
         </div>
-        
+
         <!-- Lightweight Charts will render the chart inside this div -->
         <div id="chart-container"></div>
     </div>
@@ -759,13 +825,13 @@ template =f"""
 
 
         /**
-         * Fetches trade signals from the Flask backend and plots them as markers 
+         * Fetches trade signals from the Flask backend and plots them as markers
          * on the Lightweight Chart series.
          * NOTE: This assumes the Flask backend implements the /api/trade_signals route
          * which returns an array of objects like:
          * [{{time: UTC_EPOCH_SECONDS, type: 'ENTRY_BUY'/'EXIT_SELL', price: 123.45}}]
          */
-         
+
 
  class CustomPriceMarker {{
     constructor(time, price, color) {{
@@ -773,7 +839,7 @@ template =f"""
         this.price = price;
         this.color = color;
         // Primitives require a 'uuid' or unique identifier
-        this.id = crypto.randomUUID(); 
+        this.id = crypto.randomUUID();
     }}
 
     // This method is required by the interface
@@ -829,7 +895,7 @@ class CustomPriceMarkerRenderer {{
 }}
 
         /**
-         * Fetches trade signals from the Flask backend and plots them as markers 
+         * Fetches trade signals from the Flask backend and plots them as markers
          * on the Lightweight Chart series.
          */
         async function fetchAndPlotSignals(instrumentKey, candlestickSeries, chart) {{
@@ -841,7 +907,7 @@ class CustomPriceMarkerRenderer {{
                     return;
                 }}
                 const signals = await response.json();
-                
+
                 if (signals.status === 'error' && signals.message) {{
                     console.error('Server error fetching signals:', signals.message);
                     return;
@@ -849,10 +915,10 @@ class CustomPriceMarkerRenderer {{
 
 
 
-                
+
     // Create a single invisible series once for all primitives to attach to
     // This series must have at least one data point to be visible in the time scale
-    const primitiveSeries = chart.addLineSeries({{ 
+    const primitiveSeries = chart.addLineSeries({{
         visible: false,
         priceLineVisible: false,
     }});
@@ -863,7 +929,7 @@ class CustomPriceMarkerRenderer {{
 
     signals.forEach(signal => {{
         if (signal.type.includes('ENTRY') && signal.tp_price && signal.sl_price) {{
-            
+
             // Attach the custom markers directly to the primitiveSeries
             // These will draw precisely at the 'tp_price' and 'sl_price'
             primitiveSeries.attachPrimitive(new CustomPriceMarker(signal.time, signal.tp_price, 'green'));
@@ -871,22 +937,22 @@ class CustomPriceMarkerRenderer {{
         }}
     }});
 
-    
+
 
                 // Transform signals data into Lightweight Charts marker format
-                const markers = signals.map(signal => {{               
+                const markers = signals.map(signal => {{
                     let color, shape, text, position;
                     console.log(signal);
 
                     // Determine marker properties based on the trade type and side
                     if (signal.type.includes('ENTRY')) {{
-                        
-                        const duration = 345600; 
-                        const endTime = signal.time + duration; 
+
+                        const duration = 345600;
+                        const endTime = signal.time + duration;
 
                         if (signal.tp_price && signal.sl_price) {{
                               //    const tpSeries = chart.addLineSeries({{
-                              //        color: 'rgba(39, 245, 80, 1)', 
+                              //        color: 'rgba(39, 245, 80, 1)',
                               //        lineWidth: 2,
                               //        priceLineVisible: false,
                               //        crosshairMarkerVisible: false,
@@ -898,14 +964,14 @@ class CustomPriceMarkerRenderer {{
                               //    console.log(`Plotted TP line at ${{signal.tp_price}}`);
 
                               //    const slSeries = chart.addLineSeries({{
-                              //        color: 'rgba(242, 25, 25, 1)', 
+                              //        color: 'rgba(242, 25, 25, 1)',
                               //        lineWidth: 2,
                               //        priceLineVisible: false,
                               //        crosshairMarkerVisible: false,
                               //    }});
                               //    slSeries.setData([
                               //        {{ time: signal.time, value: signal.sl_price }},
-                              //        {{ time: endTime, value: signal.sl_price }}, 
+                              //        {{ time: endTime, value: signal.sl_price }},
                               //    ]);
                               //    console.log(`Plotted SL line at ${{signal.sl_price}}`);
                               //
@@ -926,24 +992,24 @@ class CustomPriceMarkerRenderer {{
                         }}
 
                         if (signal.signal.includes('BUY')) {{
-                            color = '#10b981'; 
+                            color = '#10b981';
                             shape = 'arrowUp';
                             text = `BUY ENTRY @ ${{signal.price.toFixed(2)}}`;
                             position = 'belowBar';
-                        }} else {{ 
-                            color = '#ef4444'; 
+                        }} else {{
+                            color = '#ef4444';
                             shape = 'arrowDown';
                             text = `SELL ENTRY @ ${{signal.price.toFixed(2)}}`;
                             position = 'aboveBar';
                         }}
                     }} else if (signal.type.includes('EXIT')) {{
                         if (signal.signal.includes('SQUARE_OFF')) {{
-                            color = '#1d4ed8'; 
+                            color = '#1d4ed8';
                             shape = 'arrowUp';
                             text = `EXIT (Cover) @ ${{signal.price.toFixed(2)}}`;
                             position = 'belowBar';
-                        }} else {{ 
-                            color = '#1d4ed8'; 
+                        }} else {{
+                            color = '#1d4ed8';
                             shape = 'arrowDown';
                             text = `EXIT (Sell) @ ${{signal.price.toFixed(2)}}`;
                             position = 'aboveBar';
@@ -951,14 +1017,14 @@ class CustomPriceMarkerRenderer {{
                     }}
 
                     return {{
-                        time: signal.time, 
+                        time: signal.time,
                         position: position,
                         color: color,
                         shape: shape,
                         text: text,
                     }};
                 }}).filter(marker => marker.shape);
-                
+
                 candlestickSeries.setMarkers(markers);
                 console.log(`Plotted ${{markers.length}} trade markers.`);
 
@@ -991,25 +1057,25 @@ let chart = null;
                 errorText.textContent = message;
                 chartContainer.classList.add('hidden');
             }}
-            
+
             let candlestickSeries = null;
-            
+
 
             try {{
                 // --- 1. Fetch OHLC Data ---
                 const response = await fetch(ohlcApiUrl);
-                
+
                 if (!response.ok) {{
                     throw new Error(`HTTP error! Status: ${{response.status}}`);
                 }}
-                
+
                 const data = await response.json();
-                
+
                 if (data.status === 'error' && data.message) {{
                     showError(data.message);
                     return;
                 }}
-                
+
                 if (!Array.isArray(data) || data.length === 0) {{
                     showError("API returned no valid OHLC data.");
                     return;
@@ -1027,7 +1093,7 @@ let chart = null;
                     }},
                     crosshair: {{ mode: LightweightCharts.CrosshairMode.Normal }},
                     rightPriceScale: {{ borderColor: '#4b5563' }},
-                    timeScale: {{ 
+                    timeScale: {{
                         borderColor: '#4b5563',
                         timeVisible: true,
                         secondsVisible: false,
@@ -1035,7 +1101,7 @@ let chart = null;
                     width: chartContainer.clientWidth,
                     height: chartContainer.clientHeight,
                 }});
-                
+
                 // Make the chart responsive to container resize
                 new ResizeObserver(entries => {{
                     const {{ width, height }} = entries[0].contentRect;
@@ -1050,22 +1116,22 @@ let chart = null;
                     wickUpColor: '#10b981',
                     wickDownColor: '#ef4444',
                 }});
-                
+
                 candlestickSeries.setData(data);
-                
+
                 // 4. Fetch and Plot Trade Signals (Markers)
                 await fetchAndPlotSignals(instrumentKey, candlestickSeries, chart);
-                
+
                 // 5. Fit the data to the view
                 chart.timeScale().fitContent();
-                
+
                 // Hide loading message
                 loadingMessage.classList.add('hidden');
                 chartContainer.classList.remove('hidden');
 
-               
 
-      
+
+
 
             }} catch (error) {{
                 console.error('Fetch or Render Error:', error);
@@ -1073,7 +1139,7 @@ let chart = null;
             }}
         }})();
 
- 
+
 
                                 // --- Zoom Functions ---
                 function zoomIn() {{
@@ -1102,14 +1168,14 @@ let chart = null;
         document.addEventListener('DOMContentLoaded', (event) => {{
             //initializeChart();
             // Call the signal function after initializing the chart, passing the chart object
-            // fetchAndPlotSignals(instrumentKey, candlestickSeries, chart); 
+            // fetchAndPlotSignals(instrumentKey, candlestickSeries, chart);
 
             // Attach event listeners to the buttons
             document.getElementById('zoom-in').addEventListener('click', zoomIn);
             document.getElementById('zoom-out').addEventListener('click', zoomOut);
             document.getElementById('reset-zoom').addEventListener('click', resetZoom);
         }});
-      
+
 
     </script>
 </body>
