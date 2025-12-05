@@ -7,10 +7,16 @@ from google.protobuf.json_format import MessageToDict
 import sys
 import time
 from collections import deque
-from datetime import datetime, timedelta 
-import uuid 
+from datetime import datetime, timedelta
+import uuid
 import random # <-- REQUIRED FOR BACKOFF JITTER (already in your file)
 import traceback # <-- REQUIRED FOR DETAILED ERROR LOGGING (already in your file)
+
+try:
+    from option_chain_fetcher import get_api_client, get_option_chain, store_option_chain_data
+except ImportError:
+    print("Error: option_chain_fetcher.py not found. Please ensure it is in the same directory.", file=sys.stderr)
+    sys.exit(1)
 
 # --- MongoDB Client Setup ---
 try:
@@ -21,7 +27,7 @@ except ImportError:
     sys.exit(1)
 
 # --- MongoDB Configuration (REQUIRED) ---
-MONGO_URI = "mongodb://localhost:27017/" 
+MONGO_URI = "mongodb://localhost:27017/"
 MONGO_DB_NAME = "upstox_strategy_db"
 TICK_COLLECTION = "tick_data"
 SIGNAL_COLLECTION = "trade_signals"
@@ -32,7 +38,7 @@ def get_previous_day_range():
     previous_day = datetime.now() - timedelta(days=1)
     close_time = previous_day.replace(hour=15, minute=30, second=0, microsecond=0)
     start_time = previous_day.replace(hour=15, minute=15, second=0, microsecond=0)
-    
+
     if previous_day.weekday() in [5, 6]: # 5=Saturday, 6=Sunday
          print("Warning: Previous day was a weekend. Using a generic fallback date might be inaccurate.", file=sys.stderr)
     return start_time, close_time
@@ -44,25 +50,25 @@ class DataPersistor:
     Handles persistent logging of both raw tick data and trade signals using MongoDB.
     Uses an internal buffer to batch tick insertions for high-throughput writing.
     """
-    
-    TICK_BATCH_SIZE = 50 
-    
+
+    TICK_BATCH_SIZE = 50
+
     def __init__(self):
         self.client = None
         self.db = None
-        self.tick_buffer = deque() 
+        self.tick_buffer = deque()
         self._connect_db()
 
     def _connect_db(self):
         """Establishes connection to the MongoDB server."""
         if MONGO_URI == "mongodb://localhost:27017/":
             print("INFO: Using default MongoDB URI (localhost:27017) for single instance setup.")
-            
+
         try:
             self.client = MongoClient(MONGO_URI)
             self.db = self.client[MONGO_DB_NAME]
             print(f"DataPersistor successfully connected to MongoDB database: {MONGO_DB_NAME}")
-            
+
         except Exception as e:
             print(f"CRITICAL ERROR: Could not connect to MongoDB at {MONGO_URI}. Is the MongoDB service running? Error: {e}", file=sys.stderr)
             self.client = None
@@ -77,7 +83,7 @@ class DataPersistor:
 
     def get_unclosed_trades(self):
             """
-            Retrieves all ENTRY signals that do not have a corresponding SQUARE_OFF signal 
+            Retrieves all ENTRY signals that do not have a corresponding SQUARE_OFF signal
             to facilitate position recovery on restart.
             """
             if  self.db is None:
@@ -85,13 +91,13 @@ class DataPersistor:
             try:
                 # 1. Find all trade_ids with a SQUARE_OFF signal
                 closed_trade_ids = self.db[SIGNAL_COLLECTION].distinct("trade_id", {"signal": {"$in": ["SQUARE_OFF", "EXIT"]}})
-                
+
                 # 2. Find all ENTRY signals whose trade_id is NOT in the closed list
                 open_entries = self.db[SIGNAL_COLLECTION].find({
                     "signal": "ENTRY",
                     "trade_id": {"$nin": closed_trade_ids}
                 }).sort('timestamp', 1)
-                
+
                 return list(open_entries)
             except Exception as e:
                 print(f"Error retrieving unclosed trades: {e}")
@@ -108,13 +114,13 @@ class DataPersistor:
             return
 
         batch_to_insert = list(self.tick_buffer)
-        self.tick_buffer.clear() 
+        self.tick_buffer.clear()
 
         try:
             result = self.db[TICK_COLLECTION].insert_many(batch_to_insert, ordered=False)
             if force:
                 print(f"Flushed {len(result.inserted_ids)} remaining ticks on shutdown.")
-            
+
         except BulkWriteError as bwe:
              print(f"MongoDB BulkWriteError (tick data): Some inserts failed. Details: {bwe.details}", file=sys.stderr)
         except Exception as e:
@@ -128,7 +134,7 @@ class DataPersistor:
 
         tick_data['_insertion_time'] = datetime.now()
         self.tick_buffer.append(tick_data)
-        
+
         self._flush_ticks()
 
 
@@ -136,11 +142,30 @@ class DataPersistor:
         """Inserts a trade signal document into the 'trade_signals' collection immediately."""
         try:
             if self.db is None:
-                return 
+                return
             self.db[SIGNAL_COLLECTION].insert_one(log_entry)
-            
+
         except Exception as e:
             print(f"MongoDB insertion error (trade signal): {e}", file=sys.stderr)
+
+async def fetch_and_store_option_chain():
+    """
+    Periodically fetches and stores option chain data for NIFTY and BANKNIFTY.
+    """
+    api_client = get_api_client("v2")
+    nifty_key = "NSE_INDEX|Nifty 50"
+    banknifty_key = "NSE_INDEX|Nifty Bank"
+
+    while True:
+        try:
+            for key in [nifty_key, banknifty_key]:
+                option_chain_data = get_option_chain(api_client, key)
+                if option_chain_data:
+                    store_option_chain_data(option_chain_data)
+            await asyncio.sleep(60)  # Fetch every 60 seconds
+        except Exception as e:
+            print(f"Error in fetching/storing option chain data: {e}", file=sys.stderr)
+            await asyncio.sleep(60) # Wait before retrying
 
 # -----------------------------------------------------
 # --- HVN (Volume Profile) Calculation Logic ---
@@ -151,24 +176,24 @@ def _run_hvn_aggregation(db, instrument_key: str, start_time: datetime, end_time
     """Internal function to run the MongoDB aggregation for a given time window."""
     if db is None:
         return None
-        
+
     pipeline = [
         {
             "$match": {
                 "instrumentKey": instrument_key,
                 "_insertion_time": {"$gte": start_time, "$lte": end_time},
-                "fullFeed.marketFF.ltpc.ltp": {"$exists": True}, 
+                "fullFeed.marketFF.ltpc.ltp": {"$exists": True},
                 "fullFeed.marketFF.ltpc.ltq": {"$exists": True},
             }
         },
         {
             "$addFields": {
-                "ltq_numeric": { "$toDouble": "$fullFeed.marketFF.ltpc.ltq" } 
+                "ltq_numeric": { "$toDouble": "$fullFeed.marketFF.ltpc.ltq" }
             }
         },
         {
             "$group": {
-                "_id": "$fullFeed.marketFF.ltpc.ltp", 
+                "_id": "$fullFeed.marketFF.ltpc.ltp",
                 "total_volume": {"$sum": "$ltq_numeric"}
             }
         },
@@ -178,13 +203,13 @@ def _run_hvn_aggregation(db, instrument_key: str, start_time: datetime, end_time
 
     try:
         vpoc_data = list(db[TICK_COLLECTION].aggregate(pipeline))
-        
+
         if vpoc_data and '_id' in vpoc_data[0]:
             hvn_price = vpoc_data[0]["_id"]
             return hvn_price
-        
-        return None 
-        
+
+        return None
+
     except Exception as e:
         print(f"Error during MongoDB aggregation for HVN ({context}): {e}", file=sys.stderr)
         return None
@@ -195,21 +220,21 @@ def calculate_hvn(db, instrument_key: str) -> float | None:
     Calculates the HVN by checking the current 15-minute window, then falling back
     to the previous day's closing 15-minute window if the current is empty.
     """
-    
+
     if db is None:
         return None
 
     # --- 1. CURRENT SESSION CHECK (Last 15 minutes) ---
     end_time_now = datetime.now()
     start_time_now = end_time_now - timedelta(minutes=15)
-    
+
     hvn_current = _run_hvn_aggregation(
         db, instrument_key, start_time_now, end_time_now, "Current 15-Min"
     )
-    
+
     if hvn_current is not None:
         return hvn_current
-        
+
     # --- 2. PREVIOUS SESSION CHECK (Last 15 minutes of yesterday's close) ---
     start_prev, end_prev = get_previous_day_range()
 
@@ -219,8 +244,8 @@ def calculate_hvn(db, instrument_key: str) -> float | None:
 
     if hvn_previous is not None:
         return hvn_previous
-        
-    return None 
+
+    return None
 
 
 # -----------------------------------------------------
@@ -231,16 +256,16 @@ class PaperTradeManager:
     """
     Manages virtual positions, Stop Loss (SL), and Take Profit (TP) checks.
     """
-    
-    TP_PERCENT = 0.015 
-    DEFAULT_QTY = 1 
-    
+
+    TP_PERCENT = 0.015
+    DEFAULT_QTY = 1
+
     def __init__(self, persistor: DataPersistor):
         self.persistor = persistor
         self.positions = {}         # Dictionary to hold current open positions
         self.closed_trades = deque(maxlen=1000)
         # self.data_persistor = data_persistor # Store the instance
-        
+
         # --- NEW: Position Recovery ---
         self.load_open_positions()
         print(f"PaperTradeManager initialized. Virtual TP: {self.TP_PERCENT*100}% of entry.")
@@ -249,7 +274,7 @@ class PaperTradeManager:
 
     def load_open_positions(self):
         """
-        Attempts to load previously open positions from the DataPersistor 
+        Attempts to load previously open positions from the DataPersistor
         if the database connection is available.
         NOTE: This requires a method like self.data_persistor.get_unclosed_trades()
               to be implemented in your DataPersistor class.
@@ -257,7 +282,7 @@ class PaperTradeManager:
 
         if self.persistor is not None and self.persistor.db is not None:
             try:
-                # Assuming you implement a method in DataPersistor that queries 
+                # Assuming you implement a method in DataPersistor that queries
                 # the signal collection for trades with an 'ENTRY' but no matching 'EXIT'.
                 # Placeholder call:
                 if hasattr(self.persistor, 'get_unclosed_trades'):
@@ -265,19 +290,19 @@ class PaperTradeManager:
                     # print(open_trades_list)
                     for trade_record in open_trades_list:
                         # print(trade_record)
-                        # return '': 
+                        # return '':
                         instrument_key = trade_record.get('instrumentKey')
                         if instrument_key:
                              # Reconstruct the position dictionary using the recovered data
                             self.positions[instrument_key] = {
                                 'trade_id': trade_record.get('trade_id'),
-                                'position': trade_record.get('new_pos', 'FLAT'), 
-                                'entry_time': trade_record.get('timestamp', time.time()), 
-                                'entry_price': trade_record.get('ltp'), 
+                                'position': trade_record.get('new_pos', 'FLAT'),
+                                'entry_time': trade_record.get('timestamp', time.time()),
+                                'entry_price': trade_record.get('ltp'),
                                 'sl_price': trade_record.get('sl_price'),
                                 'tp_price': trade_record.get('tp_price'),
                                 'hvn_price': trade_record.get('hvn'),
-                                'quantity': trade_record.get('quantity', 50), 
+                                'quantity': trade_record.get('quantity', 50),
                                 'signal_reason': trade_record.get('reason', 'RESTART_RECOVERY')
                             }
                             print(f"🔄 RECOVERY: Loaded open {self.positions[instrument_key]['position']} position for {instrument_key}")
@@ -285,20 +310,20 @@ class PaperTradeManager:
 
             except Exception as e:
                 print(f"⚠️ WARNING: Failed to load open positions from DB: {e}")
-                
+
         print("INFO: DataPersistor not available or position recovery skipped. Starting with no open positions.")
     async def shutdown(self):
         """Placeholder for clean shutdown if needed."""
         # Note: Position cleanup is handled in the main finally block
         pass
-    
+
     def place_order(self, direction: str, key: str, entry_price: float, hvn_price: float, sl_price: float, signal_reason: str):
         """
         Places a new virtual order, handling reversals by closing the opposite position first.
         'entry_price' is now the realistic Best Bid/Ask price passed from StrategyEngine.
         """
         # Note: Imports like time and uuid must be available at the top of the file.
-        
+
         current_pos_data = self.positions.get(key, {})
         current_pos_direction = current_pos_data.get('position', 'FLAT')
 
@@ -313,18 +338,18 @@ class PaperTradeManager:
         # 2. Open the new position (Reverse or new entry)
         if current_pos_direction == 'FLAT' or is_reversal:
             # Calculate Take Profit (TP) based on your chosen R:R ratio (1.5 used as example)
-            RR_RATIO = 1.5 
+            RR_RATIO = 1.5
             risk = abs(entry_price - sl_price)
             tp_price = 0.0
-            
+
             if direction == 'BUY':
                 tp_price = entry_price + (risk * RR_RATIO)
             elif direction == 'SELL':
                 tp_price = entry_price - (risk * RR_RATIO)
-                
+
             trade_id = str(uuid.uuid4())
             tp_price = round(tp_price, 2)
-            
+
             # Store the new trade
             self.positions[key] = {
                 'trade_id': trade_id,
@@ -337,18 +362,18 @@ class PaperTradeManager:
                 'quantity': 50, # Example quantity
                 'signal_reason': signal_reason
             }
-            
+
             # --- CORRECTED LOGGING CALL (ENTRY) ---
             # All required positional arguments are now passed from the local variables.
             self._log_signal(
-                signal='ENTRY', 
-                key=key, 
-                ltp=entry_price, 
-                hvn=hvn_price, 
-                new_pos=direction, 
-                reason=signal_reason, 
-                sl_price=sl_price, 
-                tp_price=tp_price, 
+                signal='ENTRY',
+                key=key,
+                ltp=entry_price,
+                hvn=hvn_price,
+                new_pos=direction,
+                reason=signal_reason,
+                sl_price=sl_price,
+                tp_price=tp_price,
                 trade_id=trade_id
             )
             print(f"✅ ENTRY: {key} {direction} at {entry_price:.2f} (SL: {sl_price:.2f}, TP: {tp_price:.2f}) - Reason: {signal_reason}")
@@ -359,45 +384,45 @@ class PaperTradeManager:
     def _close_position(self, key, exit_price, reason_code, trade_id):
             """Simulates closing a position."""
             pos = self.positions.pop(key)
-            
+
             pnl = 0.0
-             
-            entry_p = float(pos['entry_price']) 
-            exit_p = float(exit_price)           
-            qty = float(pos['quantity'])        
+
+            entry_p = float(pos['entry_price'])
+            exit_p = float(exit_price)
+            qty = float(pos['quantity'])
 
             if pos['position'] == 'LONG' or pos['position'] == 'BUY':
                 pnl = (exit_p - entry_p) * qty
             else: # SHORT
                 pnl = (entry_p - exit_p) * qty
-                
-            self._log_square_off(key, exit_price, pos, pnl, reason_code, trade_id) 
-            
+
+            self._log_square_off(key, exit_price, pos, pnl, reason_code, trade_id)
+
             return pnl
-    
+
     def close_trade_for_reversal(self, key: str, exit_price: float, reason: str):
         """Closes the existing position and calculates P&L when a reversal signal occurs."""
         # Note: Imports like time and uuid must be available at the top of the file.
-        
+
         current_pos = self.positions.pop(key, None)
-        
+
         if current_pos is None:
             return  # Nothing to close
 
         direction = current_pos['position']
         entry_price = current_pos['entry_price']
-        
+
         pnl_points = 0.0
-        
+
         if direction == 'BUY':
             pnl_points = exit_price - entry_price
         elif direction == 'SELL':
             pnl_points = entry_price - exit_price
-        
+
         # Calculate P&L in currency
-        quantity = current_pos.get('quantity', 50) 
+        quantity = current_pos.get('quantity', 50)
         pnl_amount = pnl_points * quantity
-        
+
         # Finalize the trade record
         current_pos['exit_time'] = time.time()
         current_pos['exit_price'] = exit_price
@@ -405,31 +430,31 @@ class PaperTradeManager:
         current_pos['pnl_points'] = round(pnl_points, 2)
         current_pos['pnl_amount'] = round(pnl_amount, 2)
         current_pos['status'] = 'CLOSED'
-        
+
         self.closed_trades.append(current_pos)
-        
+
         # --- CORRECTED LOGGING CALL (EXIT) ---
         # --- NEW CORRECTED LOGGING CALL (EXIT) ---
         # Replace the old self._log_signal block with this:
         self._log_square_off(
-            key=key, 
-            exit_price=exit_price, 
+            key=key,
+            exit_price=exit_price,
             closed_pos=current_pos, # This passes all entry details
-            pnl=pnl_amount, 
-            reason_code=reason, 
+            pnl=pnl_amount,
+            reason_code=reason,
             trade_id=current_pos['trade_id']
         )
         # --- END NEW LOGGING CALL ---
-        
+
         print(f"🔄 REVERSAL EXIT: {key} Closed {direction} at {exit_price:.2f}. P&L: {pnl_amount:.2f}")
 
-    def _log_signal(self, signal: str, key: str, ltp: float, hvn: float, new_pos: str, reason: str, sl_price: float, tp_price: float, trade_id): 
+    def _log_signal(self, signal: str, key: str, ltp: float, hvn: float, new_pos: str, reason: str, sl_price: float, tp_price: float, trade_id):
         """Helper function for consistent entry signal logging and persistence."""
         log_entry = {
             'timestamp': time.time(),
             'signal': signal,
             'instrumentKey': key,
-            'trade_id': trade_id, 
+            'trade_id': trade_id,
             'ltp': ltp,
             'hvn_anchor': hvn,
             'position_after': new_pos,
@@ -451,23 +476,23 @@ class PaperTradeManager:
         print(f"TIME: {time.strftime('%Y-%m-%d %H:%M:%S')}")
         print("========================================================\n")
 
-    def _log_square_off(self, key, exit_price, closed_pos, pnl, reason_code, trade_id): 
+    def _log_square_off(self, key, exit_price, closed_pos, pnl, reason_code, trade_id):
         """Helper function for consistent square-off logging and persistence."""
         log_entry = {
             'timestamp': time.time(),
             'signal': 'SQUARE_OFF',
             'instrumentKey': key,
-            'trade_id': trade_id, 
+            'trade_id': trade_id,
             'exit_price': exit_price,
             'entry_price': closed_pos['entry_price'],
             'position_closed': closed_pos['position'],
             'pnl': round(pnl, 4),
-            'reason_code': reason_code, 
+            'reason_code': reason_code,
             'strategy': 'OBI_HVN',
-            'type': 'EXIT' 
+            'type': 'EXIT'
         }
         self.persistor.log_signal(log_entry)
-        
+
         print("\n--- VIRTUAL SQUARE OFF ---")
         print(f"INSTRUMENT: {key}")
         print(f"EXIT PRICE: {exit_price:.2f} | REASON: {reason_code}")
@@ -476,14 +501,14 @@ class PaperTradeManager:
         print("--------------------------\n")
 
         # --- MODIFIED FUNCTION SIGNATURE ---
-    def check_positions(self, key: str, ltp: float, bid: float, ask: float): 
+    def check_positions(self, key: str, ltp: float, bid: float, ask: float):
         """Checks if the current Bid/Ask triggers SL or TP for an active position."""
         if key not in self.positions:
             return
 
         pos = self.positions[key]
 
-        
+
         # Check if we have valid bid/ask data for accurate execution
         if bid is None or ask is None:
             # If order book data is missing, fall back to LTP for a less precise check
@@ -498,34 +523,34 @@ class PaperTradeManager:
             price_for_long_tp = ask
             price_for_short_tp = bid
 
-        pos_sl = pos.get('sl_price', 0.0)   
-        pos_tp = pos.get('tp_price', 0.0)   
-        
+        pos_sl = pos.get('sl_price', 0.0)
+        pos_tp = pos.get('tp_price', 0.0)
+
         reason_code = None
 
         if pos['position'] == 'LONG' or  pos['position'] == 'BUY':
             # Check SL: Price (Bid) falls to or below SL
-            if price_for_long_sl <= pos_sl:    
+            if price_for_long_sl <= pos_sl:
                 reason_code = 'SL_HIT'
                 exit_price = pos_sl # Use SL price for fill if triggered
             # Check TP: Price (Ask) rises to or above TP
-            elif price_for_long_tp >= pos_tp:  
+            elif price_for_long_tp >= pos_tp:
                 reason_code = 'TP_HIT'
                 exit_price = pos_tp # Use TP price for fill if triggered
-        
+
         elif pos['position'] == 'SHORT' or  pos['position'] == 'SELL':
             # Check SL: Price (Ask) rises to or above SL
-            if price_for_short_sl >= pos_sl:    
+            if price_for_short_sl >= pos_sl:
                 reason_code = 'SL_HIT'
                 exit_price = pos_sl # Use SL price for fill if triggered
             # Check TP: Price (Bid) falls to or below TP
-            elif price_for_short_tp <= pos_tp:  
+            elif price_for_short_tp <= pos_tp:
                 reason_code = 'TP_HIT'
                 exit_price = pos_tp # Use TP price for fill if triggered
 
         if reason_code:
             # Use the LTP if bid/ask was not available, otherwise use the exit price determined above
-            final_exit_price = exit_price if 'exit_price' in locals() else ltp 
+            final_exit_price = exit_price if 'exit_price' in locals() else ltp
             self._close_position(key, final_exit_price, reason_code, pos['trade_id'])
 
     # def check_positions(self, key: str, ltp: float):
@@ -541,12 +566,12 @@ class PaperTradeManager:
     #         print(" POSITION ")
     #         print(f"{postion}::LTP {ltp} :: SL={sl_price}  :: TP= {tp_price}")
     #         #print(pos)
-    #         # {'trade_id': '4f71d8b2-abc3-46fa-aeb9-36a953ad4834', 
-    #         #  'position': 'BUY', 'entry_time': 1764918497.119413, 
-    #         #  'entry_price': 813.95, 'sl_price': 739.65, 
-    #         #  'tp_price': 1074.0, 
-    #         #  'hvn_price': 739.85, 
-    #         #  'quantity': 50, 
+    #         # {'trade_id': '4f71d8b2-abc3-46fa-aeb9-36a953ad4834',
+    #         #  'position': 'BUY', 'entry_time': 1764918497.119413,
+    #         #  'entry_price': 813.95, 'sl_price': 739.65,
+    #         #  'tp_price': 1074.0,
+    #         #  'hvn_price': 739.85,
+    #         #  'quantity': 50,
     #         #  'signal_reason':
     #         #    'OBI: 2.81 (Exec at Ask)'}
     #         reason_code = None
@@ -557,7 +582,7 @@ class PaperTradeManager:
     #             # Check TP: LTP rises to or above TP
     #             elif ltp >= tp_price:  # <-- CORRECTED: Was 'take_profit'
     #                 reason_code = 'TP_HIT'
-            
+
     #         elif postion == 'SELL':
     #             # Check SL: LTP rises to or above SL
     #             if ltp >= sl_price:    # <-- CORRECTED: Was 'stop_loss'
@@ -565,7 +590,7 @@ class PaperTradeManager:
     #             # Check TP: LTP falls to or below TP
     #             elif ltp <= tp_price:  # <-- CORRECTED: Was 'take_profit'
     #                 reason_code = 'TP_HIT'
-            
+
     #         if reason_code:
     #             print("CLOSE POSTION ")
     #             # This call is still broken, see Flaw B below
@@ -595,7 +620,7 @@ except ImportError:
 ACCESS_TOKEN = 'eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI3NkFGMzUiLCJqdGkiOiI2OTMyNTI3MmY0YmViNzIzYjIzNGI1ZDEiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc2NDkwNTU4NiwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzY0OTcyMDAwfQ.J9rmWq2YRbh7RQFxLsMwaRWCE5vVyGcsY-uk8adQheU'
 INSTRUMENTS_FILE_PATH = 'nse.json.gz'
 # Use "full" mode to receive L5 Order Book data necessary for OBI Strategy
-SUBSCRIPTION_MODE = "full" 
+SUBSCRIPTION_MODE = "full"
 WSS_GUID = f"my_session_{int(time.time())}" # Unique ID for the session
 
 
@@ -605,36 +630,59 @@ class StrategyEngine:
     """
     Implements advanced strategies: Order Book Imbalance (OBI) and HVN Stop Loss.
     """
-    # Strategy 1: OBI Constants 
-    OBI_LOWER_THRESHOLD = 0.60 
+    # Strategy 1: OBI Constants
+    OBI_LOWER_THRESHOLD = 0.60
     OBI_UPPER_THRESHOLD = 1.50
-    HVN_SL_BUFFER = 0.20 
-    MIN_SL_DISTANCE = 0.50 
-    
+    HVN_SL_BUFFER = 0.20
+    MIN_SL_DISTANCE = 0.50
+
     # ⭐ NEW EV FILTER: Require a minimum trade size to confirm the signal conviction
     MIN_TRADE_QUANTITY = 5 # Example: Only act if LTQ is 5 or more
-    
+
     # CRITICAL CHANGE 1: Accept the Trade Manager instance
     def __init__(self, persistor: DataPersistor, trade_manager: PaperTradeManager):
-        self.state = {} 
-        self.persistor = persistor 
-        self.trade_manager = trade_manager 
+        self.state = {}
+        self.persistor = persistor
+        self.trade_manager = trade_manager
         print(f"Strategy initialized: Strategy 1 (OBI) is active. Thresholds: Buy >{self.OBI_UPPER_THRESHOLD}, Sell <{self.OBI_LOWER_THRESHOLD}")
         print(f"⭐ EV Filter Active: Requires Min LTQ of {self.MIN_TRADE_QUANTITY} to fire signal.")
 
+    def _get_oi_support_resistance(self, instrument_key):
+        """
+        Analyzes the latest option chain data from MongoDB to find support and resistance levels.
+        """
+        if self.persistor.db is None:
+            return None, None
+
+        try:
+            latest_oc = self.persistor.db["option_chain"].find_one(
+                {"instrument_key": instrument_key},
+                sort=[("timestamp", -1)]
+            )
+            if not latest_oc:
+                return None, None
+
+            df = pd.DataFrame(latest_oc['options_chain'])
+            support = df.loc[df['pe_open_interest'].idxmax()]['strike_price']
+            resistance = df.loc[df['ce_open_interest'].idxmax()]['strike_price']
+            return support, resistance
+        except Exception as e:
+            print(f"Error analyzing option chain data: {e}", file=sys.stderr)
+            return None, None
+
     def _calculate_order_book_imbalance(self, market_ff: dict) -> float | None:
         """
-        Calculates the OBI ratio (Total Buy Qty / Total Sell Qty) 
+        Calculates the OBI ratio (Total Buy Qty / Total Sell Qty)
         using 'tbq' (Total Bid Quantity) and 'tsq' (Total Sell Quantity).
         """
         try:
             buy_quantity_total = market_ff.get('tbq', 0)
             sell_quantity_total = market_ff.get('tsq', 0)
-            
+
             if sell_quantity_total > 0:
                 return buy_quantity_total / sell_quantity_total
             elif buy_quantity_total > 0:
-                return float('inf') 
+                return float('inf')
             else:
                 return None
 
@@ -643,11 +691,11 @@ class StrategyEngine:
 
     def _determine_hvn(self, tick_data: dict) -> float | None:
         """Calculates the HVN."""
-        instrument_key = tick_data.get('instrumentKey') 
+        instrument_key = tick_data.get('instrumentKey')
         full_feed = tick_data.get('fullFeed', {})
         ltp_fallback = full_feed.get('marketFF', {}).get('ltpc', {}).get('ltp')
-        
-        db = self.persistor.db 
+
+        db = self.persistor.db
         hvn = calculate_hvn(db, instrument_key)
 
         if hvn is not None:
@@ -661,7 +709,7 @@ class StrategyEngine:
         Strategy 1: Order Book Imbalance (OBI) with HVN Stop Loss.
         Checks for entry signals and delegates position management to the Trade Manager.
         """
-        
+
         # ⭐ NEW VOLUME FILTER: Check minimum traded quantity for signal conviction
         if ltq < self.MIN_TRADE_QUANTITY:
             # Skip signal generation if the traded quantity is too low, improving EV
@@ -677,7 +725,7 @@ class StrategyEngine:
         # --- Filter Logging ---
         is_obi_missing = obi_ratio is None
         is_hvn_missing = hvn_price is None or hvn_price == 0.0
-        
+
         if is_obi_missing or is_hvn_missing:
             return
         # --- End Filter Logging ---
@@ -687,31 +735,35 @@ class StrategyEngine:
         # The JSON structure shows bidAskQuote is under marketLevel
         market_ff = tick_data.get('fullFeed', {}).get('marketFF', {})
         bid_ask_quote = market_ff.get('marketLevel', {}).get('bidAskQuote', [{}])
-        
+
         # Safely get the best Ask (Offer) price from the first level. Use LTP as fallback.
         best_ask_price = bid_ask_quote[0].get('askP', ltp)
         # Safely get the best Bid price from the first level. Use LTP as fallback.
         best_bid_price = bid_ask_quote[0].get('bidP', ltp)
-        
+
         # Define a slippage tolerance (e.g., 0.50 points)
         SLIPPAGE_TOLERANCE = 0.50
 
         print(f"DEBUG STRATEGY ENTRY: {key} LTP={ltp:.2f}, OBI={obi_ratio:.3f}, HVN={hvn_price:.2f}, LTQ={ltq}")
 
         # 1. Check for Entry Signal (Execution)
-        
+        support, resistance = self._get_oi_support_resistance(key)
+
         # LONG Entry Trigger: Strong Buy Imbalance (Ratio > 1.10)
         if obi_ratio > self.OBI_UPPER_THRESHOLD and ( current_pos != 'LONG' or current_pos != 'BUY'):
-            
+            if resistance and ltp > resistance:
+                print(f"DEBUG STRATEGY: {key} BUY signal skipped. LTP ({ltp}) is above resistance ({resistance}).")
+                return
+
             # Set SL anchored below the HVN (support)
             sl_price = hvn_price - self.HVN_SL_BUFFER
-            
-            
+
+
             # SL Distance Check
             if (ltp - sl_price) < self.MIN_SL_DISTANCE:
                 print(f"DEBUG STRATEGY: {key} BUY signal skipped. SL distance ({ltp - sl_price:.2f}) is too small (<{self.MIN_SL_DISTANCE}).")
-                return 
-            
+                return
+
             # Set the realistic entry price to the Best Ask Price
             entry_price_used = best_ask_price
             # Price Filter: Skip if Best Ask has moved too far above the trigger LTP (Slippage Check)
@@ -722,29 +774,32 @@ class StrategyEngine:
             self.trade_manager.place_order('BUY', key, entry_price_used, hvn_price, sl_price, f"OBI: {obi_ratio:.2f} (Exec at Ask)")
         # SHORT Entry Trigger: Strong Sell Imbalance (Ratio < 0.90)
         elif obi_ratio < self.OBI_LOWER_THRESHOLD and current_pos != 'SELL':
-            
+            if support and ltp < support:
+                print(f"DEBUG STRATEGY: {key} SELL signal skipped. LTP ({ltp}) is below support ({support}).")
+                return
+
             # Set SL anchored above the HVN (resistance)
             sl_price = hvn_price + self.HVN_SL_BUFFER
-            
+
             # SL Distance Check
             if (sl_price - ltp) < self.MIN_SL_DISTANCE:
                 print(f"DEBUG STRATEGY: {key} SELL signal skipped. SL distance ({sl_price - ltp:.2f}) is too small (<{self.MIN_SL_DISTANCE}).")
-                return 
+                return
             # Set the realistic entry price to the Best Bid Price
             entry_price_used = best_bid_price
-            
+
             # Price Filter: Skip if Best Bid has moved too far below the trigger LTP (Slippage Check)
             if (ltp - entry_price_used) > SLIPPAGE_TOLERANCE:
                 print(f"DEBUG: {key} SELL skipped (Bid too low). Bid: {entry_price_used:.2f}, Trigger LTP: {ltp:.2f}. Slippage > {SLIPPAGE_TOLERANCE}")
                 return # Skip trade
-            
+
             # Execute the trade using the Best Bid as the realistic entry price
             self.trade_manager.place_order('SELL', key, entry_price_used, hvn_price, sl_price, f"OBI: {obi_ratio:.2f} (Exec at Bid)")
         else:
             print(f"DEBUG STRATEGY: {key} OBI ({obi_ratio:.3f}) is within the deadband. No action.")
 
 
-        # 2. Check for Exit Signal  
+        # 2. Check for Exit Signal
         self.trade_manager.check_positions(key, ltp, best_bid_price, best_ask_price)
 
     # ⭐ CRITICAL CHANGE: Added ltq as a parameter
@@ -753,15 +808,15 @@ class StrategyEngine:
         Receives an INDIVIDUAL decoded Protobuf tick (feed item) and routes it to the active strategy.
         """
         instrument_key = tick_data.get('instrumentKey')
-        
+
         full_feed = tick_data.get('fullFeed', {})
         ltp = full_feed.get('marketFF', {}).get('ltpc', {}).get('ltp')
-        
+
 
         if not instrument_key or ltp is None:
             return
         bid_ask_quote = full_feed.get('marketFF', {}).get('marketLevel', {}).get('bidAskQuote', [{}])
-        
+
         # Safely get the best Ask (Offer) price from the first level. Use LTP as fallback.
         best_ask_price = bid_ask_quote[0].get('askP', ltp)
         # Safely get the best Bid price from the first level. Use LTP as fallback.
@@ -770,10 +825,10 @@ class StrategyEngine:
         # Check for open positions and attempt to close them (SL/TP check)
         # --- FIX: Pass bid and ask prices ---
         self.trade_manager.check_positions(instrument_key, ltp, best_bid_price, best_ask_price) # <-- UPDATED CALL
-        
+
         # Pass the ltq to the strategy for filtering
         self.strategy_one_obi(instrument_key, tick_data, ltp, ltq)
-        
+
 # --- WSS Client Functions (UPDATED) ---
 
 def get_market_data_feed_authorize_v3(access_token: str) -> dict:
@@ -807,7 +862,7 @@ def decode_protobuf(buffer: bytes) -> pb.FeedResponse:
 
 # --- Global Constants for Reconnection ---
 MAX_RECONNECT_ATTEMPTS = 10
-BASE_RECONNECT_DELAY_SECONDS = 5.0 
+BASE_RECONNECT_DELAY_SECONDS = 5.0
 
 
 # ⭐ CRITICAL CHANGE: Rewriting the function with a proper reconnection loop
@@ -816,12 +871,16 @@ async def fetch_market_data( instrument_keys: list):
     Connect to WebSocket, subscribe, and feed ticks to the StrategyEngine with
     robust reconnection and exponential backoff.
     """
-    
+
     # 1. Initialize Core Components
     persistor = DataPersistor()
+
+    # Start the option chain fetcher task
+    asyncio.create_task(fetch_and_store_option_chain())
+
     trade_manager = PaperTradeManager(persistor=persistor)
     strategy_engine = StrategyEngine(persistor=persistor, trade_manager=trade_manager)
-    
+
     ssl_context = ssl.create_default_context()
     ssl_context.check_hostname = False
     ssl_context.verify_mode = ssl.CERT_NONE
@@ -830,7 +889,7 @@ async def fetch_market_data( instrument_keys: list):
     if len(instrument_keys) > 200:
         print(f"Limiting subscription to first 200 keys out of {len(instrument_keys)} found...")
         keys_to_subscribe = instrument_keys[:200]
-    
+
     if not keys_to_subscribe:
         print("No instrument keys found or available for subscription. Exiting.", file=sys.stderr)
         return
@@ -842,16 +901,16 @@ async def fetch_market_data( instrument_keys: list):
             print(f"Attempting WebSocket connection (Attempt {reconnect_attempts + 1})...")
                 # 1. Get Authorization
             auth_response = get_market_data_feed_authorize_v3(ACCESS_TOKEN)
-            
+
             # Extract WSS URI
             wss_uri = auth_response.get("data", {}).get("authorized_redirect_uri")
-            
+
             if not wss_uri:
                 print("ERROR: Could not find 'authorized_redirect_uri' in auth response.", file=sys.stderr)
                 sys.exit(1)
             async with websockets.connect(wss_uri, ssl=ssl_context) as websocket:
                 # Reset attempts on successful connection
-                reconnect_attempts = 0 
+                reconnect_attempts = 0
                 print(f"\nConnection established. Subscribing to {len(keys_to_subscribe)} keys in '{SUBSCRIPTION_MODE}' mode...")
 
                 await asyncio.sleep(1)
@@ -884,28 +943,28 @@ async def fetch_market_data( instrument_keys: list):
                             continue
 
                         for instrument_key, feed_data in feeds.items():
-                            feed_data['instrumentKey'] = instrument_key 
+                            feed_data['instrumentKey'] = instrument_key
 
                             # 3. LOG RAW TICK DATA TO REAL MONGODB
                             persistor.log_tick(feed_data)
-                            
+
                             full_feed = feed_data.get('fullFeed', {})
                             ltpc_data = full_feed.get('marketFF', {}).get('ltpc', {})
-                            
+
                             ltp = ltpc_data.get('ltp')
                             # ⭐ CRITICAL CHANGE: Extract LTQ for the new EV filter
-                            ltq = ltpc_data.get('ltq', 0)   
+                            ltq = ltpc_data.get('ltq', 0)
 
                             bid_ask_quote = full_feed.get('marketFF', {}).get('marketLevel', {}).get('bidAskQuote', [{}])
-        
+
                             # Safely get the best Ask (Offer) price from the first level. Use LTP as fallback.
                             best_ask_price = bid_ask_quote[0].get('askP', ltp)
                             # Safely get the best Bid price from the first level. Use LTP as fallback.
                             best_bid_price = bid_ask_quote[0].get('bidP', ltp)
-                            
+
                             try:
                                 # Ensure LTQ is an integer for the filter check
-                                ltq = int(ltq) 
+                                ltq = int(ltq)
                             except (ValueError, TypeError):
                                 ltq = 0 # Default to 0 if parsing fails
 
@@ -915,8 +974,8 @@ async def fetch_market_data( instrument_keys: list):
 
                                 # 4. Feed data to the Strategy Engine (for new signals)
                                 # Pass LTQ to the engine for the conviction filter
-                                strategy_engine.process_tick(feed_data, ltq) 
-                            
+                                strategy_engine.process_tick(feed_data, ltq)
+
                     else:
                         # Handle text messages (e.g., subscription confirmation, errors)
                         try:
@@ -924,36 +983,36 @@ async def fetch_market_data( instrument_keys: list):
                             print("\n>>> RECEIVED STATUS/ERROR MESSAGE (JSON) <<<")
                             print(json.dumps(status_json, indent=2))
                             print("------------------------------------------\n")
-                            
+
                             if status_json.get("status") == "error":
                                 print("FATAL ERROR: Subscription failed. Check the JSON above for details.")
 
                         except json.JSONDecodeError:
                             print(f"Received Unknown Text Message: {message}")
-                            
+
         # --- END OF INNER CONNECTION LOOP ---
-        
+
         # 3. Handle Expected Connection Errors
         except (websockets.exceptions.ConnectionClosedError, ConnectionAbortedError) as e:
             reconnect_attempts += 1
             print(f"\n[ERROR] WebSocket Connection Lost/Aborted: {e}")
-            
+
             if reconnect_attempts < MAX_RECONNECT_ATTEMPTS:
                 # Exponential backoff calculation: BASE * (2^attempts) + Jitter
                 delay = BASE_RECONNECT_DELAY_SECONDS * (2 ** (reconnect_attempts - 1))
-                jitter = random.uniform(0.5, 1.5) 
-                backoff_time = min(delay + jitter, 120.0) 
-                
+                jitter = random.uniform(0.5, 1.5)
+                backoff_time = min(delay + jitter, 120.0)
+
                 print(f"Reconnecting in {backoff_time:.2f} seconds...")
                 await asyncio.sleep(backoff_time)
             else:
                 print(f"❌ Failed to reconnect after {MAX_RECONNECT_ATTEMPTS} attempts. Shutting down.")
-                break 
+                break
 
         except websockets.exceptions.ConnectionClosedOK:
             print("\nWebSocket connection closed gracefully.")
             break # Exit the reconnection loop
-            
+
         except Exception as e:
             print(f"\n[FATAL ERROR] An unexpected error occurred: {e}", file=sys.stderr)
             traceback.print_exc()
@@ -964,7 +1023,7 @@ async def fetch_market_data( instrument_keys: list):
          print("Flushing final tick buffer...")
          persistor._flush_ticks(force=True)
          generate_eod_html_report(persistor.db)
-         
+
     if 'trade_manager' in locals():
         if trade_manager.positions:
             print(f"\n--- FINAL ACTIVE VIRTUAL POSITIONS ({len(trade_manager.positions)}) ---")
@@ -977,27 +1036,27 @@ async def fetch_market_data( instrument_keys: list):
 
 def main():
     """Main function to run the market data client."""
-    
+
     # 0. Load Instrument Keys
     all_keys = extract_unique_instrument_keys()
- 
-     
+
+
 
     # 2. Define the list of items you want to add
- 
+
 
     NiftyFO = ["NSE_FO|41910","NSE_FO|41913","NSE_FO|41914","NSE_FO|41915","NSE_FO|41916","NSE_FO|41917","NSE_FO|41918","NSE_FO|41921","NSE_FO|41922","NSE_FO|41923","NSE_FO|41924","NSE_FO|41925","NSE_FO|41926","NSE_FO|41927","NSE_FO|41928","NSE_FO|41935","NSE_FO|41936","NSE_FO|41939","NSE_FO|41940","NSE_FO|41943","NSE_FO|41944","NSE_FO|41945","NSE_FO|41946"]
     BN_FO =["NSE_FO|51414","NSE_FO|51415","NSE_FO|51416","NSE_FO|51417","NSE_FO|51420","NSE_FO|51421","NSE_FO|51439","NSE_FO|51440","NSE_FO|51460","NSE_FO|51461","NSE_FO|51475","NSE_FO|51476","NSE_FO|51493","NSE_FO|51498","NSE_FO|51499","NSE_FO|51500","NSE_FO|51501","NSE_FO|51502","NSE_FO|51507","NSE_FO|51510","NSE_FO|60166","NSE_FO|60167"]
     # 3. Use the update() method to add all elements from the list
     all_keys.update(NiftyFO)
     all_keys.update(BN_FO)
-    
+
     if not all_keys:
         print(f"Could not load instrument keys . Exiting.")
         sys.exit(1)
 
 
-        
+
     # 2. Start WebSocket Client
     try:
         # Note: asyncio.run() handles KeyboardInterrupt, triggering the cleanup inside fetch_market_data
@@ -1012,7 +1071,7 @@ def main():
 # (The entire reporting logic remains the same)
 def generate_eod_html_report(db):
     """
-    Generates an End-of-Day (EOD) PnL and trade summary report 
+    Generates an End-of-Day (EOD) PnL and trade summary report
     from the 'trade_signals' MongoDB collection for the current day and saves it as an HTML file.
     """
     if db is None:
@@ -1022,7 +1081,7 @@ def generate_eod_html_report(db):
     today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     query = {
         "type": "EXIT",
-        "timestamp": {"$gte": today.timestamp()} 
+        "timestamp": {"$gte": today.timestamp()}
     }
 
     try:
@@ -1032,7 +1091,7 @@ def generate_eod_html_report(db):
         return
 
     total_trades = len(exit_trades)
-    
+
     # --- P&L Calculation and Summary Generation ---
     total_pnl = 0.0
     winning_trades = 0
@@ -1045,7 +1104,7 @@ def generate_eod_html_report(db):
     for trade in exit_trades:
         pnl = trade.get('pnl', 0.0)
         total_pnl += pnl
-        
+
         if pnl > 0:
             winning_trades += 1
             pnl_class = 'trade-win'
@@ -1054,9 +1113,9 @@ def generate_eod_html_report(db):
             pnl_class = 'trade-loss'
         else:
             pnl_class = ''
-            
+
         key = trade.get('instrumentKey')
-        
+
         # Build Trade Log Rows
         trade_time = datetime.fromtimestamp(trade.get('timestamp')).strftime('%H:%M:%S')
         trade_rows += f"""
@@ -1070,7 +1129,7 @@ def generate_eod_html_report(db):
             <td class="{pnl_class}">{pnl:.2f}</td>
         </tr>
         """
-        
+
         if key not in trade_summary:
             trade_summary[key] = []
         trade_summary[key].append(pnl)
@@ -1093,7 +1152,7 @@ def generate_eod_html_report(db):
             <td class="{key_pnl_class}">{key_pnl_sign}{net_key_pnl:.2f}</td>
         </tr>
         """
-        
+
     # --- HTML Template ---
     html_template = f"""
     <!DOCTYPE html>
@@ -1124,7 +1183,7 @@ def generate_eod_html_report(db):
         <div class="container">
             <h2>📊 Paper Trading End-of-Day Report 📊</h2>
             <p style="text-align: center; color: #777;">Report Time: {today_str}</p>
-            
+
             <div class="metric-box">
                 <div class="metric pnl-neutral">
                     <h3>Total Trades</h3>
@@ -1139,7 +1198,7 @@ def generate_eod_html_report(db):
                     <p>{pnl_sign}{total_pnl:.2f}</p>
                 </div>
             </div>
-            
+
             <h3>Trade Log</h3>
             <table>
                 <thead>
@@ -1181,7 +1240,7 @@ def generate_eod_html_report(db):
     try:
         with open(filename, 'w', encoding="utf-8") as f:
             f.write(html_template)
-        
+
         print(f"\n========================================================")
         print(f"✅ EOD HTML Report saved successfully to: {filename}")
         print(f"========================================================")
