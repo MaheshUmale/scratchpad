@@ -81,24 +81,24 @@ def calculate_oi_metrics(df, prev_df):
     Returns:
         A dictionary containing the calculated metrics.
     """
-    merged_df = pd.merge(df, prev_df, on="strike_price", suffixes=("", "_prev"))
+    merged_df = pd.merge(df, prev_df, on="strike_price", suffixes=("", "_prev"), how='left')
 
     # Calculate Change in OI
-    df['ce_oi_change'] = merged_df['ce_open_interest'] - merged_df['ce_open_interest_prev']
-    df['pe_oi_change'] = merged_df['pe_open_interest'] - merged_df['pe_open_interest_prev']
+    merged_df['ce_oi_change'] = merged_df['ce_open_interest'] - merged_df['ce_open_interest_prev']
+    merged_df['pe_oi_change'] = merged_df['pe_open_interest'] - merged_df['pe_open_interest_prev']
 
     # Identify Buildups and Unwinding
-    df['ce_long_buildup'] = (df['ce_oi_change'] > 0) & (merged_df['ce_ltp'] > merged_df['ce_ltp_prev'])
-    df['ce_short_buildup'] = (df['ce_oi_change'] > 0) & (merged_df['ce_ltp'] < merged_df['ce_ltp_prev'])
-    df['ce_long_unwinding'] = (df['ce_oi_change'] < 0) & (merged_df['ce_ltp'] < merged_df['ce_ltp_prev'])
-    df['ce_short_covering'] = (df['ce_oi_change'] < 0) & (merged_df['ce_ltp'] > merged_df['ce_ltp_prev'])
+    merged_df['ce_long_buildup'] = (merged_df['ce_oi_change'] > 0) & (merged_df['ce_ltp'] > merged_df['ce_ltp_prev'])
+    merged_df['ce_short_buildup'] = (merged_df['ce_oi_change'] > 0) & (merged_df['ce_ltp'] < merged_df['ce_ltp_prev'])
+    merged_df['ce_long_unwinding'] = (merged_df['ce_oi_change'] < 0) & (merged_df['ce_ltp'] < merged_df['ce_ltp_prev'])
+    merged_df['ce_short_covering'] = (merged_df['ce_oi_change'] < 0) & (merged_df['ce_ltp'] > merged_df['ce_ltp_prev'])
 
-    df['pe_long_buildup'] = (df['pe_oi_change'] > 0) & (merged_df['pe_ltp'] > merged_df['pe_ltp_prev'])
-    df['pe_short_buildup'] = (df['pe_oi_change'] > 0) & (merged_df['pe_ltp'] < merged_df['pe_ltp_prev'])
-    df['pe_long_unwinding'] = (df['pe_oi_change'] < 0) & (merged_df['pe_ltp'] < merged_df['pe_ltp_prev'])
-    df['pe_short_covering'] = (df['pe_oi_change'] < 0) & (merged_df['pe_ltp'] > merged_df['pe_ltp_prev'])
+    merged_df['pe_long_buildup'] = (merged_df['pe_oi_change'] > 0) & (merged_df['pe_ltp'] > merged_df['pe_ltp_prev'])
+    merged_df['pe_short_buildup'] = (merged_df['pe_oi_change'] > 0) & (merged_df['pe_ltp'] < merged_df['pe_ltp_prev'])
+    merged_df['pe_long_unwinding'] = (merged_df['pe_oi_change'] < 0) & (merged_df['pe_ltp'] < merged_df['pe_ltp_prev'])
+    merged_df['pe_short_covering'] = (merged_df['pe_oi_change'] < 0) & (merged_df['pe_ltp'] > merged_df['pe_ltp_prev'])
 
-    return df
+    return merged_df
 
 def main():
     """

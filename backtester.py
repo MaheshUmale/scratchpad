@@ -48,7 +48,8 @@ def run_backtest(start_time, end_time):
         except (ValueError, TypeError):
             ltq = 0
 
-        strategy_engine.process_tick(tick, ltq)
+        timestamp = tick['_insertion_time'].timestamp()
+        strategy_engine.process_tick(tick, ltq, timestamp)
 
     print("Backtest complete.")
     # In a real scenario, you'd generate a more detailed report here

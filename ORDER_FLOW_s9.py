@@ -317,7 +317,7 @@ class PaperTradeManager:
         # Note: Position cleanup is handled in the main finally block
         pass
 
-    def place_order(self, direction: str, key: str, entry_price: float, hvn_price: float, sl_price: float, signal_reason: str):
+    def place_order(self, direction: str, key: str, entry_price: float, hvn_price: float, sl_price: float, signal_reason: str, timestamp: float):
         """
         Places a new virtual order, handling reversals by closing the opposite position first.
         'entry_price' is now the realistic Best Bid/Ask price passed from StrategyEngine.
@@ -333,7 +333,7 @@ class PaperTradeManager:
 
         if is_reversal:
             # 1. Exit the current opposite position at the current market price (entry_price)
-            self.close_trade_for_reversal(key, entry_price, 'Reversal Signal')
+            self.close_trade_for_reversal(key, entry_price, 'Reversal Signal', timestamp)
 
         # 2. Open the new position (Reverse or new entry)
         if current_pos_direction == 'FLAT' or is_reversal:
@@ -354,7 +354,7 @@ class PaperTradeManager:
             self.positions[key] = {
                 'trade_id': trade_id,
                 'position': direction,
-                'entry_time': time.time(),
+                'entry_time': timestamp,
                 'entry_price': entry_price,
                 'sl_price': sl_price,
                 'tp_price': tp_price, # New TP price
@@ -381,7 +381,7 @@ class PaperTradeManager:
             print(f"DEBUG: {key} Skipping {direction} signal because current position is already {current_pos_direction}.")
 
 
-    def _close_position(self, key, exit_price, reason_code, trade_id):
+    def _close_position(self, key, exit_price, reason_code, trade_id, timestamp: float):
             """Simulates closing a position."""
             pos = self.positions.pop(key)
 
@@ -396,11 +396,11 @@ class PaperTradeManager:
             else: # SHORT
                 pnl = (entry_p - exit_p) * qty
 
-            self._log_square_off(key, exit_price, pos, pnl, reason_code, trade_id)
+            self._log_square_off(key, exit_price, pos, pnl, reason_code, trade_id, timestamp)
 
             return pnl
 
-    def close_trade_for_reversal(self, key: str, exit_price: float, reason: str):
+    def close_trade_for_reversal(self, key: str, exit_price: float, reason: str, timestamp: float):
         """Closes the existing position and calculates P&L when a reversal signal occurs."""
         # Note: Imports like time and uuid must be available at the top of the file.
 
@@ -424,7 +424,7 @@ class PaperTradeManager:
         pnl_amount = pnl_points * quantity
 
         # Finalize the trade record
-        current_pos['exit_time'] = time.time()
+        current_pos['exit_time'] = timestamp
         current_pos['exit_price'] = exit_price
         current_pos['exit_reason'] = reason
         current_pos['pnl_points'] = round(pnl_points, 2)
@@ -442,16 +442,17 @@ class PaperTradeManager:
             closed_pos=current_pos, # This passes all entry details
             pnl=pnl_amount,
             reason_code=reason,
-            trade_id=current_pos['trade_id']
+            trade_id=current_pos['trade_id'],
+            timestamp=timestamp
         )
         # --- END NEW LOGGING CALL ---
 
         print(f"🔄 REVERSAL EXIT: {key} Closed {direction} at {exit_price:.2f}. P&L: {pnl_amount:.2f}")
 
-    def _log_signal(self, signal: str, key: str, ltp: float, hvn: float, new_pos: str, reason: str, sl_price: float, tp_price: float, trade_id):
+    def _log_signal(self, signal: str, key: str, ltp: float, hvn: float, new_pos: str, reason: str, sl_price: float, tp_price: float, trade_id, timestamp: float):
         """Helper function for consistent entry signal logging and persistence."""
         log_entry = {
-            'timestamp': time.time(),
+            'timestamp': timestamp,
             'signal': signal,
             'instrumentKey': key,
             'trade_id': trade_id,
@@ -476,10 +477,10 @@ class PaperTradeManager:
         print(f"TIME: {time.strftime('%Y-%m-%d %H:%M:%S')}")
         print("========================================================\n")
 
-    def _log_square_off(self, key, exit_price, closed_pos, pnl, reason_code, trade_id):
+    def _log_square_off(self, key, exit_price, closed_pos, pnl, reason_code, trade_id, timestamp: float):
         """Helper function for consistent square-off logging and persistence."""
         log_entry = {
-            'timestamp': time.time(),
+            'timestamp': timestamp,
             'signal': 'SQUARE_OFF',
             'instrumentKey': key,
             'trade_id': trade_id,
@@ -501,7 +502,7 @@ class PaperTradeManager:
         print("--------------------------\n")
 
         # --- MODIFIED FUNCTION SIGNATURE ---
-    def check_positions(self, key: str, ltp: float, bid: float, ask: float):
+    def check_positions(self, key: str, ltp: float, bid: float, ask: float, timestamp: float):
         """Checks if the current Bid/Ask triggers SL or TP for an active position."""
         if key not in self.positions:
             return
@@ -551,7 +552,7 @@ class PaperTradeManager:
         if reason_code:
             # Use the LTP if bid/ask was not available, otherwise use the exit price determined above
             final_exit_price = exit_price if 'exit_price' in locals() else ltp
-            self._close_position(key, final_exit_price, reason_code, pos['trade_id'])
+            self._close_position(key, final_exit_price, reason_code, pos['trade_id'], timestamp)
 
     # def check_positions(self, key: str, ltp: float):
     #     """Checks if the current LTP triggers SL or TP for an active position."""
@@ -626,6 +627,7 @@ SUBSCRIPTION_MODE = "full"
 WSS_GUID = f"my_session_{int(time.time())}" # Unique ID for the session
 
 
+import pandas as pd
 # --- Trading Strategy Engine (UPDATED) ---
 
 class StrategyEngine:
@@ -706,7 +708,7 @@ class StrategyEngine:
 
 
     # ⭐ CRITICAL CHANGE: Added ltq as a parameter for filtering
-    def strategy_one_obi(self, key: str, tick_data: dict, ltp: float, ltq: int):
+    def strategy_one_obi(self, key: str, tick_data: dict, ltp: float, ltq: int, timestamp: float):
         """
         Strategy 1: Order Book Imbalance (OBI) with HVN Stop Loss.
         Checks for entry signals and delegates position management to the Trade Manager.
@@ -773,7 +775,7 @@ class StrategyEngine:
                 print(f"DEBUG: {key} BUY skipped (Ask too high). Ask: {entry_price_used:.2f}, Trigger LTP: {ltp:.2f}. Slippage > {SLIPPAGE_TOLERANCE}")
                 return # Skip trade
              # Execute the trade using the Best Ask as the realistic entry price
-            self.trade_manager.place_order('BUY', key, entry_price_used, hvn_price, sl_price, f"OBI: {obi_ratio:.2f} (Exec at Ask)")
+            self.trade_manager.place_order('BUY', key, entry_price_used, hvn_price, sl_price, f"OBI: {obi_ratio:.2f} (Exec at Ask)", timestamp)
         # SHORT Entry Trigger: Strong Sell Imbalance (Ratio < 0.90)
         elif obi_ratio < self.OBI_LOWER_THRESHOLD and current_pos != 'SELL':
             if support and ltp < support:
@@ -796,16 +798,16 @@ class StrategyEngine:
                 return # Skip trade
 
             # Execute the trade using the Best Bid as the realistic entry price
-            self.trade_manager.place_order('SELL', key, entry_price_used, hvn_price, sl_price, f"OBI: {obi_ratio:.2f} (Exec at Bid)")
+            self.trade_manager.place_order('SELL', key, entry_price_used, hvn_price, sl_price, f"OBI: {obi_ratio:.2f} (Exec at Bid)", timestamp)
         else:
             print(f"DEBUG STRATEGY: {key} OBI ({obi_ratio:.3f}) is within the deadband. No action.")
 
 
         # 2. Check for Exit Signal
-        self.trade_manager.check_positions(key, ltp, best_bid_price, best_ask_price)
+        self.trade_manager.check_positions(key, ltp, best_bid_price, best_ask_price, timestamp)
 
     # ⭐ CRITICAL CHANGE: Added ltq as a parameter
-    def process_tick(self, tick_data: dict, ltq: int):
+    def process_tick(self, tick_data: dict, ltq: int, timestamp: float):
         """
         Receives an INDIVIDUAL decoded Protobuf tick (feed item) and routes it to the active strategy.
         """
@@ -826,10 +828,10 @@ class StrategyEngine:
 
         # Check for open positions and attempt to close them (SL/TP check)
         # --- FIX: Pass bid and ask prices ---
-        self.trade_manager.check_positions(instrument_key, ltp, best_bid_price, best_ask_price) # <-- UPDATED CALL
+        self.trade_manager.check_positions(instrument_key, ltp, best_bid_price, best_ask_price, timestamp) # <-- UPDATED CALL
 
         # Pass the ltq to the strategy for filtering
-        self.strategy_one_obi(instrument_key, tick_data, ltp, ltq)
+        self.strategy_one_obi(instrument_key, tick_data, ltp, ltq, timestamp)
 
 # --- WSS Client Functions (UPDATED) ---
 
@@ -972,11 +974,12 @@ async def fetch_market_data( instrument_keys: list):
 
                             if ltp is not None:
                                 # Check active positions against the new LTP (SL/TP check)
-                                trade_manager.check_positions(instrument_key, float(ltp), best_bid_price ,best_ask_price)
+                                timestamp = time.time()
+                                trade_manager.check_positions(instrument_key, float(ltp), best_bid_price ,best_ask_price, timestamp)
 
                                 # 4. Feed data to the Strategy Engine (for new signals)
                                 # Pass LTQ to the engine for the conviction filter
-                                strategy_engine.process_tick(feed_data, ltq)
+                                strategy_engine.process_tick(feed_data, ltq, timestamp)
 
                     else:
                         # Handle text messages (e.g., subscription confirmation, errors)
