@@ -148,18 +148,27 @@ class DataPersistor:
         except Exception as e:
             print(f"MongoDB insertion error (trade signal): {e}", file=sys.stderr)
 
+from option_chain_fetcher import get_option_contracts
+
 async def fetch_and_store_option_chain():
     """
     Periodically fetches and stores option chain data for NIFTY and BANKNIFTY.
     """
-    api_client = get_api_client("v2")
+    api_client = get_api_client()
     nifty_key = "NSE_INDEX|Nifty 50"
     banknifty_key = "NSE_INDEX|Nifty Bank"
 
     while True:
         try:
             for key in [nifty_key, banknifty_key]:
-                option_chain_data = get_option_chain(api_client, key)
+                contracts = get_option_contracts(api_client, key)
+                if not contracts:
+                    continue
+
+                expiry_dates = sorted([datetime.strptime(c.expiry, '%Y-%m-%d') for c in contracts])
+                closest_expiry = expiry_dates[0].strftime('%Y-%m-%d')
+
+                option_chain_data = get_option_chain(api_client, key, closest_expiry)
                 if option_chain_data:
                     store_option_chain_data(option_chain_data)
             await asyncio.sleep(60)  # Fetch every 60 seconds

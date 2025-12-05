@@ -5,34 +5,47 @@ from datetime import datetime
 import os
 
 # --- Configuration ---
-API_VERSION = "v2"
 ACCESS_TOKEN = os.environ.get('UPSTOX_ACCESS_TOKEN', 'YOUR_DEFAULT_TOKEN')
 
 MONGO_URI = "mongodb://localhost:27017/"
 MONGO_DB_NAME = "upstox_strategy_db"
 OC_COLLECTION_NAME = "option_chain"
 
-def get_api_client(api_version):
+def get_api_client():
     """Initializes and returns an Upstox API client instance."""
-    client = upstox_client.ApiClient(api_version)
-    client.set_access_token(ACCESS_TOKEN)
-    return client
+    configuration = upstox_client.Configuration()
+    configuration.access_token = ACCESS_TOKEN
+    api_client = upstox_client.ApiClient(configuration)
+    return api_client
 
-def get_option_chain(api_client, instrument_key):
+def get_option_contracts(api_client, instrument_key):
+    """
+    Fetches the option contracts for a given instrument key.
+    """
+    try:
+        api_instance = upstox_client.MarketQuoteApi(api_client)
+        api_response = api_instance.get_option_contract(instrument_key)
+        return api_response.data
+    except upstox_client.ApiException as e:
+        print(f"Error fetching option contracts: {e}")
+        return None
+
+def get_option_chain(api_client, instrument_key, expiry_date):
     """
     Fetches the option chain for a given instrument key.
 
     Args:
         api_client: An instance of the Upstox API client.
         instrument_key: The instrument key for the underlying (e.g., 'NSE_INDEX|Nifty 50').
+        expiry_date: The expiry date of the option chain in 'YYYY-MM-DD' format.
 
     Returns:
         A dictionary containing the option chain data, or None if an error occurs.
     """
     try:
-        opts_api = upstox_client.OptionsApi(api_client)
-        response = opts_api.get_option_chain(instrument_key=instrument_key)
-        return response.data
+        api_instance = upstox_client.MarketQuoteApi(api_client)
+        api_response = api_instance.get_put_call_option_chain(instrument_key, expiry_date)
+        return api_response.data
     except upstox_client.ApiException as e:
         print(f"Error fetching option chain: {e}")
         return None
@@ -84,8 +97,8 @@ def calculate_oi_metrics(df, prev_df):
     merged_df = pd.merge(df, prev_df, on="strike_price", suffixes=("", "_prev"), how='left')
 
     # Calculate Change in OI
-    merged_df['ce_oi_change'] = merged_df['ce_open_interest'] - merged_df['ce_open_interest_prev']
-    merged_df['pe_oi_change'] = merged_df['pe_open_interest'] - merged_df['pe_open_interest_prev']
+    merged_df['ce_oi_change'] = (merged_df['ce_open_interest'] - merged_df['ce_open_interest_prev']).fillna(0)
+    merged_df['pe_oi_change'] = (merged_df['pe_open_interest'] - merged_df['pe_open_interest_prev']).fillna(0)
 
     # Identify Buildups and Unwinding
     merged_df['ce_long_buildup'] = (merged_df['ce_oi_change'] > 0) & (merged_df['ce_ltp'] > merged_df['ce_ltp_prev'])
@@ -99,26 +112,3 @@ def calculate_oi_metrics(df, prev_df):
     merged_df['pe_short_covering'] = (merged_df['pe_oi_change'] < 0) & (merged_df['pe_ltp'] > merged_df['pe_ltp_prev'])
 
     return merged_df
-
-def main():
-    """
-    Main function to fetch, process, and store option chain data.
-    """
-    api_client = get_api_client(API_VERSION)
-
-    # Example for NIFTY
-    nifty_key = "NSE_INDEX|Nifty 50"
-    option_chain_data = get_option_chain(api_client, nifty_key)
-
-    if option_chain_data:
-        store_option_chain_data(option_chain_data)
-
-        # Convert to pandas DataFrame for analysis
-        df = pd.DataFrame(option_chain_data['options_chain'])
-        metrics_df = calculate_oi_metrics(df)
-
-        print("\nOption Chain Metrics:")
-        print(metrics_df[['strike_price', 'ce_long_buildup', 'ce_short_buildup', 'pe_long_buildup', 'pe_short_buildup']].head())
-
-if __name__ == "__main__":
-    main()
